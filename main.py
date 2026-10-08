@@ -1,99 +1,100 @@
+# -*- coding: utf-8 -*-
 import os
 import ast
-import dotenv
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain_core.tools import tool
-from langchain.memory import ConversationBufferMemory
-from langchain_community.llms import Tongyi
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+import requests
 
-# 加载环境变量
-dotenv.load_dotenv()
-api_key = os.getenv("DASHSCOPE_API_KEY")
+DASHSCOPE_API_KEY = "sk-ws-H.PEDREIY.eL0M.MEYCIQD4iFFvEygwWf5vw-G2ZIQYns8Ep5fsfx1Rv4zs8w_P4QIhAJ6X26TtvJhvrDPtPLCKIpzyadmu2Dh7TG7zOel4_nVv"
 
-# ========== 自定义工具：代码静态分析工具 ==========
-@tool
-def code_static_analyzer(code: str) -> str:
-    """
-    对输入的Python代码做静态语法检查，统计代码行数、函数数量，检测语法错误。
-    参数: code: 用户提交的Python代码字符串
-    返回: 静态分析结果文本
-    """
+def code_static_analyzer(code):
     result = []
     line_count = len(code.splitlines())
-    result.append(f"【代码基础信息】总代码行数：{line_count}")
-
+    result.append("Code lines: {}".format(line_count))
     try:
         tree = ast.parse(code)
         func_count = sum(1 for node in ast.walk(tree) if isinstance(node, ast.FunctionDef))
         class_count = sum(1 for node in ast.walk(tree) if isinstance(node, ast.ClassDef))
-        result.append(f"【语法校验】Python语法合法，无语法错误")
-        result.append(f"【结构统计】函数数量：{func_count}，类数量：{class_count}")
+        result.append("Syntax check: Pass")
+        result.append("Function count: {}, Class count: {}".format(func_count, class_count))
     except SyntaxError as e:
-        result.append(f"【语法校验❌】代码存在语法错误：第{e.lineno}行，{e.msg}")
+        result.append("Syntax ERROR at line {}: {}".format(e.lineno, e.msg))
     except Exception as e:
-        result.append(f"【分析异常】{str(e)}")
+        result.append("Analysis error: {}".format(str(e)))
     return "\n".join(result)
 
-# 工具列表
-tools = [code_static_analyzer]
 
-# ========== LLM初始化：通义千问 ==========
-llm = Tongyi(
-    model="qwen-turbo",
-    dashscope_api_key=api_key,
-    temperature=0.1
-)
+def call_qwen_api(api_key, prompt_text):
+    url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "qwen-turbo",
+        "input": {
+            "messages": [
+                {"role": "user", "content": prompt_text}
+            ]
+        },
+        "parameters": {"temperature": 0.1}
+    }
+    resp = requests.post(url, headers=headers, json=payload)
+    print("API raw response:", resp.text)
+    return resp.json()
 
-# ========== Prompt模板（Agent系统提示词） ==========
-prompt = ChatPromptTemplate.from_messages([
-    ("system", """你是专业代码审查Agent。
-你的工作流程：
-1. 拿到用户代码，先调用 code_static_analyzer 工具做静态代码分析。
-2. 结合工具返回结果 + LLM推理，做完整代码审查。
-审查维度：
-- 潜在Bug、边界错误
-- 代码规范、命名规范
-- 性能问题、安全风险
-- 可维护性、重构建议
-输出格式：
-1. 静态分析结果
-2. 缺陷清单（问题+位置+风险等级）
-3. 优化&重构建议
-语言：中文，简洁清晰。"""),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("user", "{input}"),
-    MessagesPlaceholder(variable_name="agent_scratchpad"),
-])
 
-# 记忆组件，保存多轮对话
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-# 创建Agent
-agent = create_openai_tools_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    memory=memory,
-    verbose=True,  # 打开可以看到Agent思考过程
-    handle_parsing_errors=True, # 错误处理，自动捕获解析异常
-)
-
-# ========== 命令行交互入口 ==========
 def main():
-    print("===== 代码审查Agent（命令行） =====")
-    print("输入代码进行审查，输入 exit 退出程序\n")
+    print("===== Code Review Agent (Qwen Dashscope) =====")
+    print("Paste multi-line code, end input with <<END")
+    print("Type exit to quit\n")
+
     while True:
-        user_input = input("\n请粘贴代码：")
-        if user_input.strip().lower() == "exit":
-            print("程序退出")
-            break
+        print("\nPaste your code, finish with <<END")
+        lines = []
+        while True:
+            line = input()
+            strip_line = line.strip()
+            if strip_line == "<<END":
+                break
+            if strip_line.lower() == "exit":
+                print("Program exit")
+                return
+            lines.append(line)
+        user_code = "\n".join(lines)
+
+        static_info = code_static_analyzer(user_code)
+        prompt = """You are a professional code reviewer.
+Use the static analysis result below to review the code.
+Check for bugs, boundary error, code style, performance, security and maintainability.
+Output format:
+1. Static analysis result
+2. Defect list (line number, description, risk level: High/Medium/Low)
+3. Optimization suggestions
+
+Static analysis result: {}
+Code to review:
+{}
+""".format(static_info, user_code)
+
         try:
-            resp = agent_executor.invoke({"input": user_input})
-            print("\n===== 代码审查报告 =====")
-            print(resp["output"])
+            data = call_qwen_api(DASHSCOPE_API_KEY, prompt)
+            if "output" not in data:
+                raise Exception(f"API error response: {data}")
+            output_text = data["output"]["text"]
+
+            with open("report.txt", "w", encoding="utf-8") as f:
+                f.write("===== Review Report =====\n")
+                f.write(output_text)
+            print("SUCCESS: Report saved into report.txt")
+            try:
+                print("\n===== Review Report =====")
+                print(output_text)
+            except UnicodeEncodeError:
+                print("\nWARNING: Cannot print report to console (encoding error). Please open report.txt.")
         except Exception as err:
-            print(f"❌ 执行出错：{str(err)}")
+            with open("error.txt", "w", encoding="utf-8") as f:
+                f.write(str(err))
+            print("ERROR: details saved to error.txt")
+
 
 if __name__ == "__main__":
     main()
